@@ -39,7 +39,7 @@ def run_demo(store: Store) -> dict:
             "evidence": [{"source_id": source["source_id"], "quote": "Alpha与Beta均使用示例宽松许可证。"}],
         }
         initial_model = ScriptedModel(responses=[
-            call("get_task", {}, "task-1"),
+            call("assess_task", {"assessment": {"status": "ready", "reason": "部署与许可证约束已明确", "questions": []}}, "task-1"),
             call("read_source", {"source_id": source["source_id"]}, "source-1"),
             call("save_claim", {"draft": deployment}, "claim-1"),
             call("save_claim", {"draft": license_claim}, "claim-2"),
@@ -57,7 +57,7 @@ def run_demo(store: Store) -> dict:
         (directory / "02-needs-review.md").write_text(render_report(store, task_id))
         revised = {**deployment, "text": "内网约束下撤回对Alpha的推荐，改为建议支持自托管的Beta。"}
         revision_model = ScriptedModel(responses=[
-            call("get_task", {}, "task-2"),
+            call("assess_task", {"assessment": {"status": "ready", "reason": "新部署要求已明确", "questions": []}}, "task-2"),
             call("read_source", {"source_id": source["source_id"]}, "source-2"),
             call("save_claim", {"draft": revised, "claim_id": affected_id}, "revise-1"),
             AIMessage(content="已修订部署建议；许可证结论未被改写。"),

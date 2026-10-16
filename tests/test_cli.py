@@ -73,6 +73,46 @@ class CLITests(unittest.TestCase):
         self.assertEqual(status, 0, errors)
         self.assertEqual(json.loads(output)[0]["kind"], "task.created")
 
+    def test_scenario_list_and_real_initialization(self):
+        status, output, errors = self.command("scenario", "list")
+        self.assertEqual(status, 0, errors)
+        self.assertEqual(json.loads(output)[0]["name"], "knowledge-base")
+        status, output, errors = self.command("scenario", "init", "knowledge-base", "--project", "real", "--constraint", "deployment=必须自托管")
+        self.assertEqual(status, 0, errors)
+        setup = json.loads(output)
+        self.assertEqual(setup["sources"], [])
+        self.assertEqual(setup["constraints"]["deployment"], "必须自托管")
+        self.assertFalse(setup["example_materials"])
+
+    def test_scenario_example_import_is_opt_in(self):
+        status, output, errors = self.command("scenario", "init", "knowledge-base", "--project", "fictional", "--example-materials")
+        self.assertEqual(status, 0, errors)
+        self.assertTrue(json.loads(output)["example_materials"])
+        self.assertEqual(len(json.loads(output)["sources"]), 1)
+
+    def test_review_json_export_and_markdown(self):
+        task_id = self.new_task()
+        self.command("task", "amend", task_id, "deployment", "必须自托管")
+        destination = self.directory / "review.json"
+        status, output, errors = self.command("review", task_id, "--since-version", "1", "--format", "json", "--output", str(destination))
+        self.assertEqual(status, 0, errors)
+        self.assertEqual(json.loads(destination.read_text())["state"], "no_claims")
+        self.assertEqual(destination.stat().st_mode & 0o777, 0o600)
+        status, output, errors = self.command("review", task_id)
+        self.assertEqual(status, 0, errors)
+        self.assertIn("技术选型变更对照", output)
+
+    def test_review_before_change_returns_actionable_error(self):
+        status, output, errors = self.command("review", self.new_task())
+        self.assertEqual(status, 1)
+        self.assertIn("use report", errors)
+
+    def test_scenario_demo_runs_without_loading_credentials(self):
+        with patch("dotenv.load_dotenv", side_effect=AssertionError("No credentials for demo")):
+            status, output, errors = self.command("demo", "--scenario", "knowledge-base")
+        self.assertEqual(status, 0, errors)
+        self.assertTrue(json.loads(output)["all_mechanical_checks_passed"])
+
 
 if __name__ == "__main__":
     unittest.main()

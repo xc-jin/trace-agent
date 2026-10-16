@@ -30,25 +30,27 @@ class AgentTests(unittest.TestCase):
             self.stack.enter_context(patch(target, side_effect=RuntimeError("Tests forbid external network")))
 
     def test_real_graph_tool_round_trip(self):
-        model = ScriptedModel(responses=[call("get_task", {}, "task-1"), AIMessage(content="收到任务。")])
+        model = ScriptedModel(responses=[call("assess_task", {"assessment": {"status": "ready", "reason": "要求明确", "questions": []}}, "task-1"), AIMessage(content="收到任务。")])
         result = run_agent(self.store, self.task_id, model, offline=True)
         self.assertEqual(result["model_calls"], 2)
         self.assertEqual(result["tool_calls"], 1)
         self.assertIsInstance(model.requests[1]["messages"][-1], ToolMessage)
         names = {tool.name if hasattr(tool, "name") else tool["name"] for tool in model.requests[0]["tools"]}
-        self.assertIn("get_task", names)
+        self.assertEqual(names, {"assess_task"})
+        later_names = {tool.name if hasattr(tool, "name") else tool["name"] for tool in model.requests[1]["tools"]}
+        self.assertIn("get_task", later_names)
         self.assertTrue({"execute", "task", "read_file", "write_file"}.isdisjoint(names))
         self.assertEqual(self.store.events(self.task_id)[-1]["kind"], "run.ended")
 
     def test_graph_model_limit(self):
-        model = ScriptedModel(responses=[call("get_task", {}, "task-1"), AIMessage(content="不得调用")])
+        model = ScriptedModel(responses=[call("assess_task", {"assessment": {"status": "ready", "reason": "要求明确", "questions": []}}, "task-1"), AIMessage(content="不得调用")])
         with self.assertRaises(BudgetExceeded):
             run_agent(self.store, self.task_id, model, model_limit=1, offline=True)
         self.assertEqual(len(model.requests), 1)
         self.assertEqual(self.store.events(self.task_id)[-1]["kind"], "run.failed")
 
     def test_graph_tool_limit(self):
-        model = ScriptedModel(responses=[call("get_task", {}, "first"), call("get_task", {}, "second")])
+        model = ScriptedModel(responses=[call("assess_task", {"assessment": {"status": "ready", "reason": "要求明确", "questions": []}}, "first"), call("get_task", {}, "second")])
         with self.assertRaises(BudgetExceeded):
             run_agent(self.store, self.task_id, model, tool_limit=1, offline=True)
 

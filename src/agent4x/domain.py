@@ -7,10 +7,14 @@ import re
 from typing import Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class DomainError(ValueError):
+    pass
+
+
+class RecoverableToolError(DomainError):
     pass
 
 
@@ -65,7 +69,14 @@ class ClaimDraft(BaseModel):
 
     text: str = Field(min_length=1, max_length=4000)
     kind: Literal["fact", "inference", "unresolved"]
-    depends_on: list[str] = Field(default_factory=list, max_length=32)
+    depends_on: list[str] = Field(
+        max_length=32,
+        description="Task CONSTRAINT KEYS only, such as deployment or license; never claim IDs or source IDs. Eligibility/recommendation conclusions must include the relevant constraint keys.",
+    )
+    independence_reason: str = Field(
+        default="", max_length=1000,
+        description="Required when depends_on is empty: explain why this claim is independent of every current task constraint. Empty dependencies still trigger conservative review on changes.",
+    )
     evidence: list[EvidencePin] = Field(default_factory=list, max_length=12)
     limitations: str = Field(min_length=1, max_length=2000)
 
@@ -75,3 +86,30 @@ class ClaimDraft(BaseModel):
         if not value.strip():
             raise ValueError("text must not be blank")
         return value.strip()
+
+    @model_validator(mode="after")
+    def explicit_dependencies(self):
+        if not self.depends_on and not self.independence_reason.strip():
+            raise ValueError("Empty depends_on requires an independence_reason; use task constraint keys for suitability conclusions")
+        return self
+
+
+class ClarificationQuestion(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    question: str = Field(min_length=1, max_length=1000)
+    reason: str = Field(min_length=1, max_length=1000)
+
+
+class TaskAssessment(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    status: Literal["ready", "needs_clarification"]
+    reason: str = Field(min_length=1, max_length=1000)
+    questions: list[ClarificationQuestion] = Field(max_length=3)
+
+    @model_validator(mode="after")
+    def matching_questions(self):
+        if (self.status == "needs_clarification") != bool(self.questions):
+            raise ValueError("needs_clarification requires questions; ready requires an empty questions list")
+        return self

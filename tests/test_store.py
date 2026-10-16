@@ -23,6 +23,7 @@ class StoreTests(unittest.TestCase):
     def draft(self, depends_on=None, quote="Alpha需要托管。"):
         return ClaimDraft(
             text="可考虑Alpha", kind="inference", depends_on=["deployment"] if depends_on is None else depends_on,
+            independence_reason="无约束依赖的测试记录" if depends_on == [] else "",
             evidence=[{"source_id": self.source_id, "quote": quote}], limitations="仅为课程资料",
         )
 
@@ -85,7 +86,7 @@ class StoreTests(unittest.TestCase):
             self.save(self.draft(["imaginary"]))
 
     def test_evidence_required_except_unresolved(self):
-        draft = ClaimDraft(text="待确认", kind="unresolved", limitations="缺少证据")
+        draft = ClaimDraft(text="待确认", kind="unresolved", depends_on=[], independence_reason="缺少资料，与已有约束无关", limitations="缺少证据")
         self.save(draft)
         draft.kind = "fact"
         with self.assertRaises(DomainError):

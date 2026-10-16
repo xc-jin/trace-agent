@@ -7,7 +7,7 @@ import sqlite3
 from typing import Callable
 
 from agent4x.domain import (
-    ClaimDraft, DomainError, constraint_key, digest, identifier, json_text,
+    ClaimDraft, DomainError, RecoverableToolError, TaskAssessment, constraint_key, digest, identifier, json_text,
     require_text, utc_now,
 )
 
@@ -74,6 +74,7 @@ class Store:
             "id": identifier("task"), "project": project, "goal": goal,
             "contract_version": 1, "constraints": checked, "sources": [], "claims": [],
             "questions": [], "changes": [], "created_at": utc_now(), "updated_at": utc_now(),
+            "readiness": {"status": "unassessed", "contract_version": 1},
         }
         with self.connection() as connection:
             connection.execute("INSERT INTO tasks VALUES (?, ?)", (task["id"], json_text(task)))
@@ -86,6 +87,7 @@ class Store:
 
     def snapshot(self, task_id: str) -> dict:
         task = self.task(task_id)
+        task.setdefault("readiness", {"status": "unassessed", "contract_version": task["contract_version"]})
         task["sources"] = [
             {key: source[key] for key in ("id", "title", "origin", "kind", "sha256", "created_at")}
             for source in task["sources"]
@@ -109,6 +111,7 @@ class Store:
             added = key not in task["constraints"]
             task["constraints"][key] = value
             task["contract_version"] += 1
+            task["readiness"] = {"status": "unassessed", "contract_version": task["contract_version"]}
             affected = []
             for claim in task["claims"]:
                 if added or not claim["depends_on"] or key in claim["depends_on"]:
@@ -148,10 +151,10 @@ class Store:
 
     def read_source(self, task_id: str, source_id: str, start: int = 0, limit: int = 6000) -> dict:
         if type(start) is not int or start < 0 or type(limit) is not int or not 1 <= limit <= 10000:
-            raise DomainError("Invalid source slice")
+            raise RecoverableToolError("Invalid source slice: start >= 0 and limit between 1 and 10000")
         source = next((source for source in self.task(task_id)["sources"] if source["id"] == source_id), None)
         if source is None:
-            raise DomainError("Unknown source in this task")
+            raise RecoverableToolError("Unknown source in this task; use source IDs returned by get_task")
         return {
             **{key: source[key] for key in ("id", "title", "origin", "kind", "sha256")},
             "start": start, "content": source["content"][start:start + limit], "total_characters": len(source["content"]),
@@ -179,20 +182,22 @@ class Store:
         def action(task):
             if task["contract_version"] != expected_version:
                 raise DomainError("Contract changed during this run; start a fresh run")
+            if task.get("readiness", {}).get("status") == "needs_clarification":
+                raise RecoverableToolError("Task awaits user clarification; do not save further claims until the user amends the contract")
             if not set(draft.depends_on).issubset(task["constraints"]):
-                raise DomainError("Claim refers to an unknown constraint key")
+                raise RecoverableToolError("depends_on accepts task constraint keys only, never claim IDs or source IDs")
             if draft.kind != "unresolved" and not draft.evidence:
-                raise DomainError("Facts and inferences require at least one evidence quote")
+                raise RecoverableToolError("Facts and inferences require at least one evidence quote")
             checked = []
             for pin in draft.evidence:
                 source = next((entry for entry in task["sources"] if entry["id"] == pin.source_id), None)
                 if source is None or pin.quote not in source["content"]:
-                    raise DomainError("Evidence must be an exact quote from a source in this task")
+                    raise RecoverableToolError("Evidence must be an exact quote from a source in this task; read the source and retry")
                 start = source["content"].index(pin.quote)
                 checked.append({**pin.model_dump(), "source_sha256": source["sha256"], "start": start, "end": start + len(pin.quote)})
             existing = next((entry for entry in task["claims"] if entry["id"] == claim_id), None) if claim_id else None
             if claim_id and existing is None:
-                raise DomainError("Unknown claim in this task")
+                raise RecoverableToolError("Unknown claim in this task; use an existing claim ID from get_task or omit claim_id for a new claim")
             if not existing and len(task["claims"]) >= 30:
                 raise DomainError("Claim limit reached (30 per task)")
             version = {
@@ -210,6 +215,27 @@ class Store:
 
         return self._change(task_id, "claim.saved", action)
 
+    def assess(self, task_id: str, assessment: TaskAssessment, expected_version: int, assessment_id: str | None = None) -> dict:
+        def action(task):
+            if task["contract_version"] != expected_version:
+                raise DomainError("Contract changed; start a fresh run")
+            if task.get("readiness", {}).get("status") == "needs_clarification":
+                raise RecoverableToolError("Task already awaits user input; the user must amend the contract before reassessment")
+            if len(task["questions"]) + len(assessment.questions) > 20:
+                raise DomainError("Question limit reached")
+            questions = [
+                {"id": identifier("question"), **question.model_dump(), "contract_version": expected_version}
+                for question in assessment.questions
+            ]
+            task["questions"].extend(questions)
+            task["readiness"] = {
+                "id": assessment_id or identifier("assessment"), "status": assessment.status,
+                "reason": assessment.reason, "contract_version": expected_version,
+            }
+            return {**task["readiness"], "questions": questions}
+
+        return self._change(task_id, "task.assessed", action)
+
     def question(self, task_id: str, question: str, reason: str, expected_version: int) -> dict:
         question = require_text(question, "question", 1000)
         reason = require_text(reason, "reason", 1000)
@@ -221,6 +247,10 @@ class Store:
             if len(task["questions"]) >= 20:
                 raise DomainError("Question limit reached")
             task["questions"].append(entry)
+            task["readiness"] = {
+                "id": identifier("assessment"), "status": "needs_clarification",
+                "reason": reason, "contract_version": expected_version,
+            }
             return entry
 
         return self._change(task_id, "clarification.proposed", action)

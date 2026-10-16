@@ -30,7 +30,16 @@ def parser():
     root = argparse.ArgumentParser(description="TraceAgent：可追溯、可修订的技术决策助手")
     root.add_argument("--data-dir", type=Path, default=Path(".agent4x"))
     commands = root.add_subparsers(dest="command", required=True)
-    commands.add_parser("demo", help="离线演示，不使用 key、不允许网络")
+    demo = commands.add_parser("demo", help="离线演示，不使用 key、不允许网络")
+    demo.add_argument("--scenario", choices=["basic", "knowledge-base"], default="basic")
+
+    scenario = commands.add_parser("scenario", help="建立技术选型场景模板").add_subparsers(dest="action", required=True)
+    scenario.add_parser("list")
+    initialize = scenario.add_parser("init")
+    initialize.add_argument("name", choices=["knowledge-base"])
+    initialize.add_argument("--project", required=True)
+    initialize.add_argument("--constraint", action="append", default=[])
+    initialize.add_argument("--example-materials", action="store_true", help="导入虚构示例，不能用于真实产品选型")
 
     task = commands.add_parser("task").add_subparsers(dest="action", required=True)
     new = task.add_parser("new")
@@ -59,6 +68,11 @@ def parser():
     report = commands.add_parser("report")
     report.add_argument("task_id")
     report.add_argument("--output", type=Path)
+    review = commands.add_parser("review", help="不调用模型，按契约版本对照结论变化")
+    review.add_argument("task_id")
+    review.add_argument("--since-version", type=int)
+    review.add_argument("--format", choices=["markdown", "json"], default="markdown")
+    review.add_argument("--output", type=Path)
     trace = commands.add_parser("trace")
     trace.add_argument("task_id")
 
@@ -81,7 +95,19 @@ def dispatch(arguments):
     if arguments.command == "demo":
         from agent4x.demo import run_demo
 
-        print_json(run_demo(store))
+        if arguments.scenario == "knowledge-base":
+            from agent4x.scenario_demo import run_knowledge_base_demo
+
+            print_json(run_knowledge_base_demo(store))
+        else:
+            print_json(run_demo(store))
+    elif arguments.command == "scenario":
+        from agent4x.scenarios import create_scenario, list_scenarios
+
+        if arguments.action == "list":
+            print_json(list_scenarios())
+        else:
+            print_json(create_scenario(store, arguments.name, arguments.project, constraints=parse_constraints(arguments.constraint), example_materials=arguments.example_materials))
     elif arguments.command == "task":
         if arguments.action == "new":
             print_json(store.new_task(arguments.goal, arguments.project, parse_constraints(arguments.constraint)))
@@ -101,6 +127,18 @@ def dispatch(arguments):
             print(text)
     elif arguments.command == "trace":
         print_json(store.events(arguments.task_id))
+    elif arguments.command == "review":
+        from agent4x.review import build_review, render_review
+
+        review = build_review(store, arguments.task_id, arguments.since_version)
+        text = json.dumps(review, ensure_ascii=False, indent=2) if arguments.format == "json" else render_review(review)
+        if arguments.output:
+            arguments.output.parent.mkdir(parents=True, exist_ok=True)
+            arguments.output.write_text(text, encoding="utf-8")
+            arguments.output.chmod(0o600)
+            print(f"Review saved: {arguments.output}")
+        else:
+            print(text)
     elif arguments.command == "memory":
         if arguments.action == "list":
             print_json(store.memories(arguments.project))

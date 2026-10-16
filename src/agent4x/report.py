@@ -11,6 +11,8 @@ def render_report(store: Store, task_id: str) -> str:
         "", "## 当前任务约束", "",
     ]
     lines += [f"- `{key}`：{value}" for key, value in task["constraints"].items()] or ["尚未明确约束。"]
+    if task.get("readiness", {}).get("status") == "needs_clarification":
+        lines += ["", "> 当前任务等待用户澄清；以下已有记录不是完整最终建议。"]
     questions = [question for question in task["questions"] if question["contract_version"] == task["contract_version"]]
     if questions:
         lines += ["", "## 待澄清问题", ""]
@@ -27,6 +29,8 @@ def render_report(store: Store, task_id: str) -> str:
             f"类型：{claim['kind']} · 依赖：{', '.join(claim['depends_on']) or '未声明（保守复核）'}", "",
             claim["text"], "", f"局限：{claim['limitations']}", "",
         ]
+        if claim.get("independence_reason"):
+            lines += [f"空依赖说明：{claim['independence_reason']}（约束变化时仍保守复核）", ""]
         if claim["status"] == "needs_review":
             lines += [f"**复核原因：{claim['review_reason']}。以下内容是历史结论，不是当前推荐。**", ""]
         for pin in claim["evidence"]:

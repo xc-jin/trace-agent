@@ -1,14 +1,51 @@
 from __future__ import annotations
 
+from typing import Literal
 from urllib.parse import urlsplit
 
 from langchain_core.tools import tool
+from pydantic import Field, create_model
 
-from agent4x.domain import ClaimDraft, DomainError, require_text
+from agent4x.domain import ClaimDraft, RecoverableToolError, TaskAssessment, json_text, require_text
 from agent4x.store import Store
 
 
-def build_tools(store: Store, task_id: str, expected_version: int, search_client=None):
+def build_tools(store: Store, task_id: str, expected_version: int, search_client=None, assessment_id: str | None = None):
+    task = store.task(task_id)
+    constraint_keys = tuple(task["constraints"])
+    review_ids = frozenset(claim["id"] for claim in task["claims"] if claim["status"] == "needs_review")
+    preserved_ids = frozenset(claim["id"] for claim in task["claims"]) - review_ids
+    dependency_type = list[Literal[constraint_keys]] if constraint_keys else list[str]
+    bound_draft = create_model(
+        "TaskClaimDraft", __base__=ClaimDraft,
+        depends_on=(dependency_type, Field(
+            max_length=32 if constraint_keys else 0,
+            description=ClaimDraft.model_fields["depends_on"].description,
+        )),
+    )
+    claim_input = create_model("SaveClaimInput", draft=(bound_draft, ...), claim_id=(str, ""))
+
+    def feedback(message, code="invalid_tool_input"):
+        return {"ok": False, "error": {"code": code, "message": message, "retryable": True}, "allowed_constraint_keys": list(constraint_keys)}
+
+    def recover(action, *arguments):
+        try:
+            return action(*arguments)
+        except RecoverableToolError as error:
+            return feedback(str(error))
+
+    def validation_feedback(error):
+        issues = [
+            {"field": ".".join(str(part) for part in item["loc"]), "message": item["msg"]}
+            for item in error.errors()
+        ]
+        return json_text(feedback(issues, "invalid_arguments"))
+
+    @tool
+    def assess_task(assessment: TaskAssessment) -> dict:
+        """FIRST step: assess whether user requirements are sufficient. Choose ready with no questions, or needs_clarification with concrete questions; the latter ends this run for user input."""
+        return recover(store.assess, task_id, assessment, expected_version, assessment_id)
+
     @tool
     def get_task() -> dict:
         """Read the task contract, claims, pending questions and confirmed project memories."""
@@ -22,12 +59,14 @@ def build_tools(store: Store, task_id: str, expected_version: int, search_client
     @tool
     def read_source(source_id: str, start: int = 0, limit: int = 6000) -> dict:
         """Read a bounded slice of one source in this task. Use exact quotes, not invented citations."""
-        return store.read_source(task_id, source_id, start, limit)
+        return recover(store.read_source, task_id, source_id, start, limit)
 
-    @tool
+    @tool(args_schema=claim_input)
     def save_claim(draft: ClaimDraft, claim_id: str = "") -> dict:
-        """Register an evidence-backed claim, or revise an existing claim by ID. Declare all relevant constraint keys."""
-        return store.save_claim(task_id, draft, expected_version, claim_id)
+        """Register/revise a claim. depends_on contains task CONSTRAINT KEYS, never claim IDs. Suitability against deployment/license depends on those keys. An empty list requires independence_reason and still causes conservative review. For revisions pass the original claim_id. Correct retryable errors before claiming success."""
+        if review_ids and claim_id in preserved_ids:
+            return feedback("This revision run preserves unaffected claims. Leave this claim unchanged; update only the original needs_review IDs or add genuinely new findings.", "outside_review_batch")
+        return recover(store.save_claim, task_id, draft, expected_version, claim_id)
 
     @tool
     def request_clarification(question: str, reason: str) -> dict:
@@ -39,7 +78,7 @@ def build_tools(store: Store, task_id: str, expected_version: int, search_client
         """Propose project-scoped experience for explicit human confirmation. Cannot activate or edit memories."""
         return store.propose_memory(task_id, text)
 
-    tools = [get_task, search_sources, read_source, save_claim, request_clarification, propose_memory]
+    tools = [assess_task, get_task, search_sources, read_source, save_claim, request_clarification, propose_memory]
     if search_client is not None:
         @tool
         def search_web(query: str) -> list[dict]:
@@ -63,4 +102,6 @@ def build_tools(store: Store, task_id: str, expected_version: int, search_client
             return results
 
         tools.append(search_web)
+    for registered_tool in tools:
+        registered_tool.handle_validation_error = validation_feedback
     return tools
